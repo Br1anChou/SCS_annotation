@@ -7,6 +7,8 @@ __pycache__/
 
 # Test artifacts
 tests/_fixture_*.txt
+tests/_finalize_*.tsv
 
 # Local annotation outputs
 anno_candidate_annotation.txt
+anno_final_annotation.txt

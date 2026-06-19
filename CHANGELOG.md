@@ -3,6 +3,18 @@
 All notable changes to the scs-annotator skill are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.1.0]
+
+### Added
+- **`scripts/finalize_annotation.py`** — stage-2 finalizer. After candidates are
+  validated, apply final per-cluster calls from an overrides table (TSV/CSV/JSON
+  keyed by `cluster`). Preserves every original column, overrides only the
+  annotation columns for named clusters, leaves candidate values for the rest, and
+  recomputes `confidence` from an overridden `score`. Output: `anno_final_annotation.txt`.
+- `examples/striatum_overrides.tsv` — worked overrides example (13 striatal clusters).
+- `tests/run_finalize_tests.py` — regression test for the finalizer.
+- README "Finalizing (stage 2)" section documenting the two-stage workflow.
+
 ## [1.0.0]
 
 Major behavioral overhaul of ambient-RNA / doublet handling, plus packaging.

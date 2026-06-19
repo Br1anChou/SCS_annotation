@@ -1,6 +1,6 @@
 ---
 name: scs-annotator
-version: 1.0.0
+version: 1.1.0
 description: >-
   Rigorous single-cell RNA-seq cluster cell-type annotation. Use when given a cluster marker table or Seurat FindAllMarkers output (columns like cluster/gene/avg_log2FC/pct.1 or cluster/gene/mean_expression/cell_ratio) and asked to assign cell types, name clusters, validate markers, or produce publication-style annotations. Distinguishes ambient-RNA bleed from genuine doublets via marker specificity, and flags candidate doublets/mixed clusters for per-cell QC. Triggers on: 单细胞注释, 细胞注释, 细胞类型鉴定, 细胞类型注释, marker基因注释, 注释marker表, 双细胞/doublet 判定, annotate clusters, cell type identification.
 ---
@@ -12,6 +12,8 @@ Annotate marker tables by preserving original columns and appending:
 `manual_type`, `score`, `confidence`, `marker_basis`, `evidence_support`, `annotation_note`
 
 Use the exact column name `manual_type` (not `mannual_type`). Default output for downstream analysis is `anno_candidate_annotation.txt` in the input directory. Default species is human; use `--species mouse` only when explicitly told. The bundled script is a candidate generator, not final literature validation. Publication-facing results require database and paper-level evidence.
+
+Two-stage workflow: `score_annotations.py` emits **candidates** → you validate (markers + database/literature) → record final calls in an overrides table and apply them with `finalize_annotation.py` to produce `anno_final_annotation.txt`, preserving all original columns.
 
 ## Input
 
@@ -46,7 +48,9 @@ Also accepts Seurat-like tables with `cluster`, `gene`, `avg_log2FC` or `avg_log
 
 ## Resources
 
-- `scripts/score_annotations.py`: deterministic candidate annotation and scoring. Flags ambient RNA data-drivenly (broadly-present, never-specific genes) and gates doublet calls by specificity; emits soft `Doublet QC` notes for borderline conflicts.
+- `scripts/score_annotations.py`: stage 1 — deterministic candidate annotation and scoring. Flags ambient RNA data-drivenly (broadly-present, never-specific genes) and gates doublet calls by specificity; emits soft `Doublet QC` notes for borderline conflicts.
+- `scripts/finalize_annotation.py`: stage 2 — after you validate the candidates, apply your final per-cluster calls from an overrides table (TSV/CSV/JSON keyed by `cluster`); preserves all original columns, overrides only the annotation columns for named clusters, and recomputes `confidence` from an overridden `score`. Output defaults to `anno_final_annotation.txt`.
 - `references/markers.md`: compact marker panel.
 - `references/databases.md`: search/query guide, including per-cell doublet confirmation.
-- `tests/run_tests.py` + `tests/fixture_doublet.tsv`: regression test locking in real-doublet detection vs ambient-bleed rejection. Run `python3 tests/run_tests.py` after editing the scoring script.
+- `examples/striatum_overrides.tsv`: worked overrides example (13 striatal clusters).
+- `tests/run_tests.py`, `tests/run_finalize_tests.py` (+ `tests/fixture_doublet.tsv`): regression tests for the scorer (real-doublet vs ambient-bleed) and the finalizer (overrides merge). Run both after editing the scripts.

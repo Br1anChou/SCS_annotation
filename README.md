@@ -17,6 +17,7 @@ calls still require that step (see [Caveats](#caveats)).
 - [Input](#input) — formats, columns, examples
 - [Running the script](#running-the-script) — CLI, flags, stdout
 - [Output](#output) — appended columns, value ranges, examples
+- [Finalizing (stage 2)](#finalizing-stage-2) — apply your validated calls
 - [How calls are made](#how-calls-are-made) — ambient RNA & doublets
 - [Tests](#tests) · [Caveats](#caveats) · [Layout](#repository-layout)
 
@@ -183,6 +184,46 @@ type was assigned but a doublet is not excluded — confirm at the cell level.**
 
 ---
 
+## Finalizing (stage 2)
+
+`score_annotations.py` produces **candidates**. The intended workflow is two
+stages:
+
+```
+markers.tsv ──score_annotations.py──▶ candidate ──(you validate)──▶ overrides.tsv
+                                          │                              │
+                                          └────finalize_annotation.py────┴──▶ final
+```
+
+After validating the candidates (marker specificity + database/literature),
+record your final per-cluster calls in an **overrides** table and apply them with
+`scripts/finalize_annotation.py`. It keeps every original column and replaces only
+the annotation columns for the clusters you name, leaving the script's candidate
+values for the rest — so you never hand-edit the numeric columns.
+
+```bash
+python3 scripts/finalize_annotation.py anno_candidate_annotation.txt \
+    --overrides my_overrides.tsv --output anno_final_annotation.txt
+```
+
+**Overrides table** — TSV/CSV/JSON keyed by `cluster`, with any subset of the six
+annotation columns. Empty cells / absent columns keep the candidate value. If you
+override `score` but omit `confidence`, the confidence bucket is recomputed for you.
+
+```
+cluster	manual_type	score	annotation_note
+3	Astrocyte-1	0.90	Clean astrocyte; weak neuron signal is ambient PENK/TAC1, not a doublet.
+8	Interneuron	0.70	GABAergic interneuron: LHX6/SST/NPY/VIP enriched; candidate D1-MSN overridden.
+```
+
+JSON form: `{"3": {"manual_type": "Astrocyte-1", "score": "0.90"}, ...}`.
+
+A complete worked example for the striatal dataset is in
+[`examples/striatum_overrides.tsv`](examples/striatum_overrides.tsv) (all 13
+clusters, with marker basis, evidence, and notes).
+
+---
+
 ## How calls are made
 
 Full decision rules live in [`SKILL.md`](SKILL.md); the two that matter most for
@@ -207,13 +248,16 @@ appear (they are usually background).
 ## Tests
 
 ```bash
-python3 tests/run_tests.py    # exit 0 = all pass
+python3 tests/run_tests.py           # scorer: ambient vs doublet   (exit 0 = pass)
+python3 tests/run_finalize_tests.py  # finalizer: overrides merge   (exit 0 = pass)
 ```
 
-The fixture ([`tests/fixture_doublet.tsv`](tests/fixture_doublet.tsv)) locks in
-three behaviours at once: a genuine doublet is detected, ambient-only bleed is
-**not** flagged as a doublet, and a borderline secondary lineage is surfaced (not
-dropped). Run it after editing `scripts/score_annotations.py`.
+`run_tests.py` ([`tests/fixture_doublet.tsv`](tests/fixture_doublet.tsv)) locks in
+three scorer behaviours at once: a genuine doublet is detected, ambient-only bleed
+is **not** flagged as a doublet, and a borderline secondary lineage is surfaced
+(not dropped). `run_finalize_tests.py` checks that overrides replace only the named
+clusters/fields, recompute confidence from an overridden score, and preserve every
+original column. Run both after editing the scripts.
 
 ---
 
@@ -232,10 +276,14 @@ dropped). Run it after editing `scripts/score_annotations.py`.
 ## Repository layout
 
 ```
-SKILL.md                       # skill definition + decision rules (entry point)
-scripts/score_annotations.py   # deterministic candidate annotation & scoring
-references/markers.md          # canonical marker panels by tissue / cell type
-references/databases.md        # marker-DB query guide + doublet confirmation
-tests/run_tests.py             # regression test (ambient vs doublet)
-tests/fixture_doublet.tsv      # test fixture
+SKILL.md                          # skill definition + decision rules (entry point)
+scripts/score_annotations.py      # stage 1: deterministic candidate annotation & scoring
+scripts/finalize_annotation.py    # stage 2: apply validated per-cluster calls onto candidates
+references/markers.md             # canonical marker panels by tissue / cell type
+references/databases.md           # marker-DB query guide + doublet confirmation
+examples/striatum_overrides.tsv   # worked overrides example (striatal dataset)
+tests/run_tests.py                # regression test (ambient vs doublet)
+tests/run_finalize_tests.py       # regression test (finalizer)
+tests/fixture_doublet.tsv         # test fixture
+CHANGELOG.md                      # version history
 ```
