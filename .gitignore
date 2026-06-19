@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Test artifacts
+tests/_fixture_*.txt
+
+# Local annotation outputs
+anno_candidate_annotation.txt
