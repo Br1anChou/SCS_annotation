@@ -202,3 +202,14 @@ Not cell-type specific; if these dominate the top markers, the cluster likely re
 
 ## Doublet Indicators
 If a cluster highly expresses canonical markers from TWO distinct lineages simultaneously (e.g., both T-cell and B-cell markers, or both epithelial and immune markers at high levels), classify as `Doublet`.
+
+**Doublet vs ambient RNA — gate by specificity.** Co-expression alone is not enough: a
+true doublet requires *both* lineages to be **cluster-specific** (enriched here, depleted
+elsewhere). A second lineage that is high-`cell_ratio` but globally present / low-
+specificity is ambient bleed, not a doublet. Classic ambient bleeders to discount unless
+cluster-specific: `PENK` (striatum), `PLP1`/`MBP` (myelin/white matter), `MALAT1`,
+`NEAT1`, `XIST`, hemoglobin `HBB`/`HBA1/2`. Examples of genuine mutually-exclusive doublet
+pairs (each side specific): `CD3E/CD3D + CD19/MS4A1` (T+B), `PLP1/MBP + SNAP25/SYT1`
+(oligo+neuron), `PECAM1/CDH5 + SNAP25` (endothelial+neuron), `EPCAM/KRT + PTPRC` (epithelial+immune).
+Cluster-level conflict is a **candidate** flag only — confirm per-cell (Scrublet/DoubletFinder,
+co-expression, UMAP) as in `databases.md`.

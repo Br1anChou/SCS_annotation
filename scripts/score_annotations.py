@@ -404,47 +404,91 @@ def detect_doublets(
     cluster_genes: dict[int, list[str]],
     cluster_data: dict[int, list[dict]],
     ambient_genes: set[str] | None = None,
-) -> dict[int, str]:
+    stats: dict | None = None,
+    min_specificity: float = 2.0,
+) -> tuple[dict[int, str], dict[int, str]]:
     """
     Check each cluster for mutually exclusive marker co-expression.
-    Returns {cluster_id: 'clean' | 'Mixed(lineageA+lineageB)' | 'Doublet'}.
+
+    A *hard* doublet/mixed call requires BOTH conflicting lineages to be
+    cluster-specific — each side must contribute a marker with cell_ratio above
+    threshold AND specificity >= ``min_specificity``. This is the key precision
+    fix: it ignores ambient bleed (high ratio but low specificity / present
+    everywhere) so a clean astrocyte with background PENK/TAC1 is no longer
+    mislabelled a doublet, while a genuine cell-mixing event — two specific
+    programs co-expressed — is still caught.
+
+    A *soft* conflict is recorded when one lineage is solidly specific but the
+    other has a non-ambient, sub-specific marker present (a genuinely ambiguous
+    middle ground). These never override the dominant call but are surfaced for
+    per-cell doublet QC instead of being silently dropped. Pure ambient overlap
+    (the secondary side is only ambient genes) raises no flag.
+
+    Returns ``(results, conflict_flags)`` where ``results[cid]`` is
+    ``'clean' | 'Mixed(A+B)' | 'Doublet(A+B)'`` and ``conflict_flags[cid]`` is
+    an optional QC note string for soft conflicts.
+
+    Backward-compatible: without ``stats`` the specificity gate is bypassed
+    (every marker treated as specific), reproducing the ratio-only behaviour.
     """
     ambient_genes = ambient_genes or set()
-    results = {}
+    results: dict[int, str] = {}
+    conflict_flags: dict[int, str] = {}
     for cid, genes_list in cluster_genes.items():
-        # Get gene -> cell_ratio mapping
         gene_ratio = {}
         for row in cluster_data.get(cid, []):
             gene_ratio[row["gene"]] = row["cell_ratio"]
+        gene_spec: dict[str, float] = {}
+        if stats and cid in stats:
+            for g, info in stats[cid]["gene_info"].items():
+                gene_spec[g] = info.get("specificity", 0.0)
 
-        top_genes = set(genes_list[:15]) - ambient_genes
-        conflicts = []
+        raw_top = set(genes_list[:15])
+        clean_top = raw_top - ambient_genes
+        hard_conflicts: list[tuple[str, str]] = []
+        soft_conflicts: list[tuple[str, str]] = []
         for set_a, set_b in MUTUALLY_EXCLUSIVE:
-            hits_a = top_genes & set_a
-            hits_b = top_genes & set_b
-            # Check if both sides have high expression signals
             threshold = 0.50 if set_a == GLIA_CONFLICT_MARKERS else 0.40
-            strong_a = [g for g in hits_a if gene_ratio.get(g, 0) > threshold]
-            strong_b = [g for g in hits_b if gene_ratio.get(g, 0) > threshold]
-            if strong_a and strong_b:
-                # Determine which lineages are conflicting
-                lineage_a = _infer_lineage(set_a)
-                lineage_b = _infer_lineage(set_b)
-                conflicts.append(f"{lineage_a}+{lineage_b}")
+            hits_a = clean_top & set_a
+            hits_b = clean_top & set_b
 
-        if conflicts:
-            formatted = []
-            for conflict in conflicts:
-                parts = [_format_lineage(p) for p in conflict.split("+")]
-                formatted.append("+".join(parts))
+            def _specific(hits):
+                return [g for g in hits
+                        if gene_ratio.get(g, 0) > threshold
+                        and gene_spec.get(g, 99.0) >= min_specificity]
+
+            def _weak(hits):
+                return [g for g in hits
+                        if gene_ratio.get(g, 0) > threshold
+                        and gene_spec.get(g, 99.0) < min_specificity]
+
+            spec_a, spec_b = _specific(hits_a), _specific(hits_b)
+            lineage_a, lineage_b = _infer_lineage(set_a), _infer_lineage(set_b)
+
+            if spec_a and spec_b:
+                hard_conflicts.append((lineage_a, lineage_b))
+            elif (spec_a and _weak(hits_b)) or (spec_b and _weak(hits_a)):
+                soft_conflicts.append((lineage_a, lineage_b))
+
+        if hard_conflicts:
+            formatted = ["+".join(_format_lineage(p) for p in pair)
+                         for pair in hard_conflicts]
             label = "/".join(formatted)
-            if any("T cell+B cell" in conflict or "B cell+T cell" in conflict for conflict in formatted):
-                results[cid] = f"Doublet({label})"
-            else:
-                results[cid] = f"Mixed({label})"
+            is_immune = any({"T-cell", "B-cell"} <= set(pair)
+                            for pair in hard_conflicts)
+            results[cid] = f"Doublet({label})" if is_immune else f"Mixed({label})"
         else:
             results[cid] = "clean"
-    return results
+
+        if soft_conflicts and not hard_conflicts:
+            pairs = "; ".join("+".join(_format_lineage(p) for p in pair)
+                              for pair in soft_conflicts)
+            conflict_flags[cid] = (
+                f"cross-lineage markers co-occur ({pairs}) but the secondary "
+                "lineage is sub-specific/ambient — bleed most likely; rule out "
+                "doublet with per-cell Scrublet/DoubletFinder + UMAP position"
+            )
+    return results, conflict_flags
 
 
 def _infer_lineage(gene_set: set[str]) -> str:
@@ -468,26 +512,71 @@ def _format_lineage(name: str) -> str:
     return CLASSIC_NAME_ALIASES.get(name, name)
 
 
-def flag_ambient_rna(stats: dict, tissue: str | None = None) -> set[str]:
+def flag_ambient_rna(
+    stats: dict,
+    tissue: str | None = None,
+    presence_ratio: float = 0.30,
+    breadth_frac: float = 0.80,
+    max_specificity: float = 1.5,
+) -> set[str]:
     """
-    Identify genes that appear in every cluster at moderate levels —
-    likely ambient RNA contamination, not true markers.
+    Identify likely ambient-RNA genes: broadly present across clusters yet
+    never cluster-specific.
+
+    Two complementary signals:
+      * Seed list (AMBIENT_PRONE): known high-abundance bleeders, flagged when
+        detectably expressed (mean_expression > 0.01) in >80% of clusters.
+      * Data-driven: ANY gene expressed at cell_ratio > ``presence_ratio`` in
+        more than ``breadth_frac`` of clusters whose best specificity across
+        clusters stays below ``max_specificity`` (never strongly enriched
+        anywhere). This catches tissue-specific bleeders such as TAC1 that are
+        absent from the hard-coded seed list — the gap that previously drove
+        false glia/neuron "doublet" calls.
+
+    A gene that is a genuine marker somewhere keeps high specificity in that
+    cluster, so it is never flagged — preserving real doublet signal while
+    removing background that would otherwise trigger spurious lineage
+    conflicts. The breadth threshold (>80%) is deliberately strict so that a
+    canonical marker shared by two clusters of the same cell type (e.g. SLC1A3
+    across two astrocyte clusters) is not mistaken for ambient.
     """
     if not stats:
         return set()
     all_clusters = list(stats.keys())
     n_clusters = len(all_clusters)
-    candidate_genes = AMBIENT_PRONE
+    if n_clusters == 0:
+        return set()
+
+    all_genes: set[str] = set()
+    for cid in all_clusters:
+        all_genes.update(stats[cid]["gene_info"].keys())
 
     ambient = set()
-    for gene in candidate_genes:
-        cluster_count = 0
+    for gene in all_genes:
+        seed_clusters = 0
+        moderate_clusters = 0
+        best_specificity = 0.0
         for cid in all_clusters:
             info = stats[cid]["gene_info"].get(gene, {})
-            if info and info.get("mean_expression", 0) > 0.01:
-                cluster_count += 1
-        # If present in >80% of clusters at moderate level → ambient
-        if cluster_count > n_clusters * 0.8:
+            if not info:
+                continue
+            if info.get("mean_expression", 0.0) > 0.01:
+                seed_clusters += 1
+            if info.get("cell_ratio", 0.0) > presence_ratio:
+                moderate_clusters += 1
+            best_specificity = max(best_specificity, info.get("specificity", 0.0))
+
+        # Never flag a gene that is strongly cluster-specific somewhere — even a
+        # known bleeder like PLP1/MBP is a genuine marker in the cluster where
+        # it defines the cell type (high specificity), and must stay available
+        # to detect real doublets there.
+        if best_specificity >= max_specificity:
+            continue
+        broadly_present = (
+            (gene in AMBIENT_PRONE and seed_clusters > n_clusters * 0.8)
+            or moderate_clusters > n_clusters * breadth_frac
+        )
+        if broadly_present:
             ambient.add(gene)
     return ambient
 
@@ -812,9 +901,32 @@ def _marker_panel_for_label(base: str) -> set[str]:
     return set()
 
 
-def marker_basis_for(cluster_id: int, stats: dict, max_markers: int = 5) -> str:
-    markers = stats[cluster_id]["genes_ranked"][:max_markers]
-    return "+".join(markers)
+def marker_basis_for(
+    cluster_id: int,
+    stats: dict,
+    label: str = "",
+    ambient_genes: set[str] | None = None,
+    max_markers: int = 5,
+) -> str:
+    """Markers supporting the assigned ``label``, in rank order.
+
+    Prefers genes from the label's canonical panel (so the basis matches the
+    call rather than echoing the raw top-ranked genes, which may be ambient or
+    off-type), then backfills with the strongest non-ambient ranked genes.
+    """
+    ambient_genes = ambient_genes or set()
+    ranked = stats[cluster_id]["genes_ranked"]
+    panel = _marker_panel_for_label(_base_annotation_name(label))
+
+    basis = [g for g in ranked if g in panel and g not in ambient_genes]
+    if len(basis) < 2:
+        for g in ranked:
+            if g in ambient_genes or g in basis:
+                continue
+            basis.append(g)
+            if len(basis) >= max_markers:
+                break
+    return "+".join(basis[:max_markers])
 
 
 def _is_brain_tissue(tissue: str | None) -> bool:
@@ -1257,8 +1369,8 @@ def main():
     cluster_genes_for_doublets = {
         cid: data["genes_ranked"] for cid, data in stats.items()
     }
-    doublet_results = detect_doublets(
-        cluster_genes_for_doublets, cluster_data_raw, ambient_genes,
+    doublet_results, conflict_flags = detect_doublets(
+        cluster_genes_for_doublets, cluster_data_raw, ambient_genes, stats=stats,
     )
 
     # Group by cluster
@@ -1346,6 +1458,19 @@ def main():
     # Ensure each cluster receives a unique, interpretable label.
     final_names = make_unique_annotation_names(cluster_types, stats)
 
+    # Fold residual (ambient-explained / borderline) lineage conflicts into the
+    # note and cap confidence, so a single-type call never reads "high" while a
+    # doublet remains unexcluded. Hard doublets already carry a Mixed/Doublet
+    # label and are left untouched.
+    conflict_note_by_cid = {}
+    for cid in cluster_types:
+        label = final_names.get(cid, "")
+        if cid in conflict_flags and not (
+            label.startswith("Mixed") or label.startswith("Doublet")
+        ):
+            conflict_note_by_cid[cid] = conflict_flags[cid]
+            cluster_scores[cid] = min(cluster_scores.get(cid, 0.0), 0.65)
+
     # Output
     annotation_cols = [
         "manual_type", "score", "confidence",
@@ -1366,13 +1491,16 @@ def main():
             raw = row.get("_raw", {})
             score = cluster_scores.get(cid, 0.0)
             label = final_names.get(cid, "Unclassified")
+            note = annotation_note_for(label, score, cid, stats)
+            if cid in conflict_note_by_cid:
+                note = f"{note} | Doublet QC: {conflict_note_by_cid[cid]}"
             additions = {
                 "manual_type": label,
                 "score": str(score),
                 "confidence": confidence_label(score),
-                "marker_basis": marker_basis_for(cid, stats),
+                "marker_basis": marker_basis_for(cid, stats, label, ambient_genes),
                 "evidence_support": evidence_support_for(label, cid, stats),
-                "annotation_note": annotation_note_for(label, score, cid, stats),
+                "annotation_note": note,
             }
             writer.writerow([
                 additions[col] if col in additions else raw.get(col, "")

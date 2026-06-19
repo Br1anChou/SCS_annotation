@@ -93,3 +93,29 @@ Can GENE_A and GENE_B be co-expressed in the same cell type?
 - **Prefer PanglaoDB** for novel or rarely-studied genes (broader coverage from scRNA-seq studies)
 - **Prefer PubMed/literature** when databases disagree or for rare cell types
 - **Cross-validate**: if 2+ databases agree on a marker assignment, confidence is higher
+
+## Confirming Doublets / Mixed Clusters (cell-level)
+
+Marker-table conflict is only a **candidate** doublet — it cannot distinguish a true
+cell-mixing event from ambient-RNA bleed at the cluster level. Before committing to (or
+dismissing) a `Doublet`/`Mixed` call, confirm with cell-resolution evidence:
+
+- **Specificity first**: a real doublet shows *both* lineages cluster-specific (high in
+  this cluster, low elsewhere). A second lineage that is high but present across most
+  clusters / low-specificity is ambient RNA (e.g. striatal `PENK`, myelin `PLP1/MBP`) —
+  not a doublet.
+- **Per-cell doublet scores**: run **Scrublet** or **DoubletFinder** and check whether
+  the cluster is enriched for high-doublet-score cells. The scoring script's `Doublet QC`
+  note marks clusters that need this check.
+- **Co-expression at single-cell level**: in a true doublet the two marker programs fire
+  in the *same cells*; in ambient contamination the background gene is spread thinly
+  across many cells. Inspect a co-expression scatter / feature plot.
+- **UMAP / cluster topology**: doublet clusters frequently sit on the bridge between two
+  parent clusters and may shrink or vanish after doublet removal and re-clustering.
+
+**Web search patterns:**
+```
+Scrublet DoubletFinder detect doublets scRNA-seq cluster
+Can CELLTYPE_A and CELLTYPE_B markers co-express same cell doublet vs ambient RNA
+ambient RNA contamination SoupX correction GENE bleed scRNA-seq
+```
